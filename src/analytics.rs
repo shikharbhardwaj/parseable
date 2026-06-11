@@ -50,11 +50,12 @@ use crate::{
 const ANALYTICS_SERVER_URL: &str = "https://analytics.parseable.io:80";
 const ANALYTICS_SEND_INTERVAL_SECONDS: Interval = clokwerk::Interval::Hours(1);
 
-pub static SYS_INFO: Lazy<Mutex<System>> = Lazy::new(|| Mutex::new(System::new_all()));
+pub static SYS_INFO: Lazy<Mutex<System>> = Lazy::new(|| Mutex::new(System::new()));
 
 pub fn refresh_sys_info() {
     let mut sys_info = SYS_INFO.lock().unwrap();
-    sys_info.refresh_all();
+    sys_info.refresh_memory();
+    sys_info.refresh_cpu_all();
 }
 
 #[derive(Serialize, Deserialize)]
