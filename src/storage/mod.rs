@@ -122,6 +122,11 @@ pub const CURRENT_SCHEMA_VERSION: &str = "v7";
 
 const CONNECT_TIMEOUT_SECS: u64 = 5;
 const REQUEST_TIMEOUT_SECS: u64 = 30;
+/// Total time budget across all retry attempts for an object store request.
+/// Must be comfortably larger than `REQUEST_TIMEOUT_SECS`, otherwise a single
+/// request that hits the request timeout exhausts the budget and no retries
+/// are attempted.
+const RETRY_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectStoreFormat {

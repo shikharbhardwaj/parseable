@@ -61,7 +61,7 @@ use crate::{
 
 use super::{
     CONNECT_TIMEOUT_SECS, ObjectStorage, ObjectStorageError, ObjectStorageProvider,
-    PARSEABLE_ROOT_DIRECTORY, REQUEST_TIMEOUT_SECS, STREAM_METADATA_FILE_NAME,
+    PARSEABLE_ROOT_DIRECTORY, REQUEST_TIMEOUT_SECS, RETRY_TIMEOUT_SECS, STREAM_METADATA_FILE_NAME,
     metrics_layer::MetricLayer, object_storage::parseable_json_path, partial_path,
     to_object_store_path,
 };
@@ -248,7 +248,7 @@ impl S3Config {
         }
         let retry_config = RetryConfig {
             max_retries: 5,
-            retry_timeout: Duration::from_secs(5),
+            retry_timeout: Duration::from_secs(RETRY_TIMEOUT_SECS),
             backoff: BackoffConfig::default(),
         };
 
