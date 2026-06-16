@@ -1120,21 +1120,6 @@ impl ObjectStorage for S3 {
         Ok(result.map(|_| ())?)
     }
 
-    async fn delete_stream(
-        &self,
-        stream_name: &str,
-        tenant_id: &Option<String>,
-    ) -> Result<(), ObjectStorageError> {
-        let prefix = if let Some(tenant) = tenant_id.as_ref() {
-            &format!("{tenant}/{stream_name}")
-        } else {
-            stream_name
-        };
-        self._delete_prefix(prefix, tenant_id).await?;
-
-        Ok(())
-    }
-
     async fn try_delete_node_meta(
         &self,
         node_filename: String,

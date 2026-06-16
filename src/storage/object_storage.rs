@@ -360,11 +360,56 @@ pub trait ObjectStorage: Debug + Send + Sync + 'static {
         tenant_id: &Option<String>,
     ) -> Result<(), ObjectStorageError>;
     async fn check(&self, tenant_id: &Option<String>) -> Result<(), ObjectStorageError>;
+    /// Delete an entire stream from object storage.
+    ///
+    /// Rather than issuing a single recursive LIST over the whole stream
+    /// prefix — which on a large stream can exceed the request timeout and
+    /// then make zero forward progress — this deletes each immediate
+    /// sub-directory (the `date=...` partitions) on its own so every LIST
+    /// stays small. Storage deletes are idempotent, so an interrupted run is
+    /// resumable: already deleted partitions no longer appear on a retry, and
+    /// only the remainder is processed.
     async fn delete_stream(
         &self,
         stream_name: &str,
         tenant_id: &Option<String>,
-    ) -> Result<(), ObjectStorageError>;
+    ) -> Result<(), ObjectStorageError> {
+        let stream_prefix = match tenant_id {
+            Some(tenant) => RelativePathBuf::from_iter([tenant.as_str(), stream_name]),
+            None => RelativePathBuf::from(stream_name),
+        };
+
+        // `list_dates` returns the immediate child directories of the stream
+        // (the `date=...` partitions). Delete them one at a time so each LIST
+        // is scoped to a single date rather than the entire stream. Keep going
+        // on a failed partition so the run makes as much progress as possible.
+        let partitions = self.list_dates(stream_name, tenant_id).await?;
+        let mut failed = false;
+        for partition in partitions {
+            let partition_prefix = stream_prefix.join(&partition);
+            if let Err(err) = self.delete_prefix(&partition_prefix, tenant_id).await {
+                error!(
+                    "Failed to delete partition '{partition_prefix}' while deleting stream '{stream_name}': {err}"
+                );
+                failed = true;
+            }
+        }
+
+        // If any partition could not be deleted, stop before the root sweep:
+        // re-issuing the delete resumes from what remains, and we avoid having
+        // the final sweep LIST the still-present partitions.
+        if failed {
+            return Err(ObjectStorageError::Custom(format!(
+                "stream '{stream_name}' was not fully deleted; retry to resume deletion of the remaining partitions"
+            )));
+        }
+
+        // Partitions are gone — remove the small set of remaining root-level
+        // objects (stream metadata, schema, manifests).
+        self.delete_prefix(&stream_prefix, tenant_id).await?;
+
+        Ok(())
+    }
     async fn list_streams(&self) -> Result<HashSet<LogStream>, ObjectStorageError>;
     async fn list_old_streams(&self) -> Result<HashSet<LogStream>, ObjectStorageError>;
     async fn list_dirs(
