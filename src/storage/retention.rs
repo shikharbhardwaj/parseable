@@ -57,12 +57,16 @@ pub fn init_scheduler() {
                         if let Some(config) = stream.get_retention() {
                             for Task { action, days, .. } in config.tasks.into_iter() {
                                 match action {
+                                    // Process streams sequentially: await each delete before
+                                    // moving on, to avoid bursting the object store with many
+                                    // concurrent LIST/DELETE calls at once.
                                     Action::Delete => {
-                                        let stream_name = stream_name.clone();
-                                        let id = tenant_id.clone();
-                                        tokio::spawn(async move {
-                                            action::delete(stream_name, u32::from(days), &id).await;
-                                        });
+                                        action::delete(
+                                            stream_name.clone(),
+                                            u32::from(days),
+                                            &tenant_id,
+                                        )
+                                        .await;
                                     }
                                 };
                             }
