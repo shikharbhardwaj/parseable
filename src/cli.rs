@@ -595,6 +595,17 @@ pub struct Options {
         help = "Object store sync threshold in seconds"
     )]
     pub object_store_sync_threshold: u64,
+    // maximum number of streams whose staged files are uploaded to object
+    // store concurrently during a single sync cycle. Bounding this prevents a
+    // large stream count from flooding the shared object store client/pool.
+    #[arg(
+        long = "object-store-sync-concurrency",
+        env = "P_OBJECT_STORE_SYNC_CONCURRENCY",
+        value_parser = clap::value_parser!(u64).range(1..),
+        default_value = "16",
+        help = "Maximum number of streams uploaded to object store concurrently during a sync cycle"
+    )]
+    pub object_store_sync_concurrency: u64,
     // the oidc scope
     #[arg(
         long = "oidc-scope",

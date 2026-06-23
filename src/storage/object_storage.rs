@@ -1391,6 +1391,13 @@ pub fn sync_all_streams(joinset: &mut JoinSet<Result<(), ObjectStorageError>>) {
         vec![None]
     };
     let handle = FLUSH_AND_CONVERT_RUNTIME.handle();
+    // Bound how many streams upload concurrently so a large stream count can't
+    // flood the shared object store client/pool (and the backend) all at once.
+    // Tasks are still spawned eagerly but each acquires a permit before doing
+    // any object store work, so at most N uploads are in flight at a time.
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(
+        PARSEABLE.options.object_store_sync_concurrency as usize,
+    ));
     for tenant_id in tenants {
         for stream_name in PARSEABLE.streams.list(&tenant_id) {
             if let Ok(stream) = PARSEABLE.get_stream(&stream_name, &tenant_id)
@@ -1401,9 +1408,16 @@ pub fn sync_all_streams(joinset: &mut JoinSet<Result<(), ObjectStorageError>>) {
             }
             let object_store = object_store.clone();
             let id = tenant_id.clone();
+            let semaphore = semaphore.clone();
             let span = info_span!("stream_upload", stream_name = %stream_name);
             joinset.spawn_on(
                 async move {
+                    // Permit is held for this stream's upload and released on
+                    // completion, capping concurrent uploads to the configured limit.
+                    let _permit = semaphore
+                        .acquire_owned()
+                        .await
+                        .expect("object store sync semaphore is never closed");
                     let start = Instant::now();
                     let result = object_store
                         .upload_files_from_staging(&stream_name, id)
