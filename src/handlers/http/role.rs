@@ -25,6 +25,8 @@ use actix_web::{
     web::{self, Json},
 };
 
+use crate::handlers::http::rbac::UPDATE_LOCK;
+use crate::rbac::Users;
 use crate::rbac::map::roles;
 use crate::rbac::role::model::{Role, RoleType, RoleUI};
 use crate::{
@@ -54,6 +56,11 @@ pub async fn put(
 
     // validate the role name
     validator::user_role_name(&name).map_err(RoleError::ValidationError)?;
+
+    // `.parseable.json` is rewritten wholesale below. Without this lock a
+    // concurrent user create/delete that read the document before us would be
+    // clobbered by our write, resurrecting rows the other handler just removed.
+    let _guard = UPDATE_LOCK.lock().await;
 
     let mut metadata = get_metadata(&tenant_id).await?;
     metadata.roles.insert(name.clone(), role.clone());
@@ -138,18 +145,32 @@ pub async fn delete(
         return Err(RoleError::ProtectedRole);
     }
 
+    let _guard = UPDATE_LOCK.lock().await;
+
     // check if the role is being used by any user or group
     let mut metadata = get_metadata(&tenant_id).await?;
-    if metadata.users.iter().any(|user| user.roles.contains(&name)) {
-        return Err(RoleError::RoleInUse);
+    let (blocking_users, phantom_users) = partition_role_holders(&metadata, &name, &tenant_id);
+    if !phantom_users.is_empty() {
+        tracing::warn!(
+            role = %name,
+            ?phantom_users,
+            "ignoring role assignments held by users that are absent from the user map"
+        );
     }
-    if metadata
+    if !blocking_users.is_empty() {
+        return Err(RoleError::RoleInUseByUsers(blocking_users));
+    }
+
+    let blocking_groups: Vec<String> = metadata
         .user_groups
         .iter()
-        .any(|user_group| user_group.roles.contains(&name))
-    {
-        return Err(RoleError::RoleInUse);
+        .filter(|user_group| user_group.roles.contains(&name))
+        .map(|user_group| user_group.name.clone())
+        .collect();
+    if !blocking_groups.is_empty() {
+        return Err(RoleError::RoleInUseByGroups(blocking_groups));
     }
+
     metadata.roles.remove(&name);
     put_metadata(&metadata, &tenant_id).await?;
 
@@ -211,6 +232,28 @@ pub async fn get_default(req: HttpRequest) -> Result<impl Responder, RoleError> 
     Ok(web::Json(res))
 }
 
+/// Split the users that hold `role` in `.parseable.json` into those that still
+/// exist in the in-memory user map and those that do not.
+///
+/// The two stores can diverge (a crash between the metadata write and the
+/// in-memory update, a lost update from an unsynchronised writer, or a stale
+/// read of `.parseable.json`). A row that survives only in the document is
+/// unreachable through the user APIs — `GET`/`DELETE /user/{name}` answer from
+/// the in-memory map and return 404 — so counting it as a blocker leaves the
+/// role permanently undeletable. Only live users may block deletion.
+pub(crate) fn partition_role_holders(
+    metadata: &StorageMetadata,
+    role: &str,
+    tenant_id: &Option<String>,
+) -> (Vec<String>, Vec<String>) {
+    metadata
+        .users
+        .iter()
+        .filter(|user| user.roles.contains(role))
+        .map(|user| user.userid().to_owned())
+        .partition(|userid| Users.contains(userid, tenant_id))
+}
+
 async fn get_metadata(
     tenant_id: &Option<String>,
 ) -> Result<crate::storage::StorageMetadata, ObjectStorageError> {
@@ -236,8 +279,10 @@ async fn put_metadata(
 pub enum RoleError {
     #[error("Failed to connect to storage: {0}")]
     ObjectStorageError(#[from] ObjectStorageError),
-    #[error("Cannot perform this operation as role is assigned to an existing user.")]
-    RoleInUse,
+    #[error("Cannot delete role, it is assigned to user(s): {0:?}")]
+    RoleInUseByUsers(Vec<String>),
+    #[error("Cannot delete role, it is assigned to user group(s): {0:?}")]
+    RoleInUseByGroups(Vec<String>),
     #[error("Cannot perform this operation as role is assigned to a protected user.")]
     ProtectedRole,
     #[error("Error: {0}")]
@@ -256,7 +301,8 @@ impl actix_web::ResponseError for RoleError {
     fn status_code(&self) -> StatusCode {
         match self {
             Self::ObjectStorageError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::RoleInUse => StatusCode::BAD_REQUEST,
+            Self::RoleInUseByUsers(_) => StatusCode::BAD_REQUEST,
+            Self::RoleInUseByGroups(_) => StatusCode::BAD_REQUEST,
             Self::SuperAdminPrivilege => StatusCode::BAD_REQUEST,
             Self::ProtectedRole => StatusCode::BAD_REQUEST,
             Self::Anyhow(_) => StatusCode::INTERNAL_SERVER_ERROR,

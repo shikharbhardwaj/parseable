@@ -27,7 +27,8 @@ use crate::{
     handlers::http::{
         cluster::{sync_role_delete, sync_role_update},
         modal::utils::rbac_utils::{get_metadata, put_metadata},
-        role::RoleError,
+        rbac::UPDATE_LOCK,
+        role::{RoleError, partition_role_holders},
     },
     parseable::DEFAULT_TENANT,
     rbac::{
@@ -73,6 +74,11 @@ pub async fn put(
     if role.deny_super_admin() {
         return Err(RoleError::SuperAdminPrivilege);
     }
+
+    // `.parseable.json` is rewritten wholesale below. Without this lock a
+    // concurrent user create/delete that read the document before us would be
+    // clobbered by our write, resurrecting rows the other handler just removed.
+    let _guard = UPDATE_LOCK.lock().await;
 
     let mut metadata = get_metadata(&tenant_id).await?;
     metadata.roles.insert(name.clone(), role.clone());
@@ -142,18 +148,32 @@ pub async fn delete(
         return Err(RoleError::ProtectedRole);
     }
 
+    let _guard = UPDATE_LOCK.lock().await;
+
     // check if the role is being used by any user or group
     let mut metadata = get_metadata(&tenant_id).await?;
-    if metadata.users.iter().any(|user| user.roles.contains(&name)) {
-        return Err(RoleError::RoleInUse);
+    let (blocking_users, phantom_users) = partition_role_holders(&metadata, &name, &tenant_id);
+    if !phantom_users.is_empty() {
+        tracing::warn!(
+            role = %name,
+            ?phantom_users,
+            "ignoring role assignments held by users that are absent from the user map"
+        );
     }
-    if metadata
+    if !blocking_users.is_empty() {
+        return Err(RoleError::RoleInUseByUsers(blocking_users));
+    }
+
+    let blocking_groups: Vec<String> = metadata
         .user_groups
         .iter()
-        .any(|user_group| user_group.roles.contains(&name))
-    {
-        return Err(RoleError::RoleInUse);
+        .filter(|user_group| user_group.roles.contains(&name))
+        .map(|user_group| user_group.name.clone())
+        .collect();
+    if !blocking_groups.is_empty() {
+        return Err(RoleError::RoleInUseByGroups(blocking_groups));
     }
+
     metadata.roles.remove(&name);
     put_metadata(&metadata, &tenant_id).await?;
 

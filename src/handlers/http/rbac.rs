@@ -168,12 +168,8 @@ pub async fn post_user(
     let created_role = user_roles.clone();
     Users.put_user(user.clone());
     if !created_role.is_empty() {
-        add_roles_to_user(
-            req,
-            web::Path::<String>::from(userid.clone()),
-            web::Json(created_role),
-        )
-        .await?;
+        // `_guard` is still held: call the inner form, `UPDATE_LOCK` is not reentrant.
+        add_roles_to_user_inner(req, userid.clone(), created_role).await?;
     }
     Ok(password)
 }
@@ -365,8 +361,17 @@ pub async fn add_roles_to_user(
     userid: web::Path<String>,
     roles_to_add: web::Json<HashSet<String>>,
 ) -> Result<impl Responder, RBACError> {
-    let userid = userid.into_inner();
-    let roles_to_add = roles_to_add.into_inner();
+    let _guard = UPDATE_LOCK.lock().await;
+    add_roles_to_user_inner(req, userid.into_inner(), roles_to_add.into_inner()).await
+}
+
+/// Body of [`add_roles_to_user`]. The caller **must** hold [`UPDATE_LOCK`]:
+/// this rewrites `.parseable.json` wholesale, and the mutex is not reentrant.
+async fn add_roles_to_user_inner(
+    req: HttpRequest,
+    userid: String,
+    roles_to_add: HashSet<String>,
+) -> Result<HttpResponse, RBACError> {
     let tenant_id = get_tenant_id_from_request(&req);
     let tenant_str = tenant_id.as_deref().unwrap_or(DEFAULT_TENANT);
     if !Users.contains(&userid, &tenant_id) {
@@ -445,6 +450,7 @@ pub async fn remove_roles_from_user(
     let userid = userid.into_inner();
     let roles_to_remove = roles_to_remove.into_inner();
     let tenant_id = get_tenant_id_from_request(&req);
+    let _guard = UPDATE_LOCK.lock().await;
     if !Users.contains(&userid, &tenant_id) {
         return Err(RBACError::UserDoesNotExist);
     };
