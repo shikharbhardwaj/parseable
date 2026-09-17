@@ -8,6 +8,7 @@
 name: Release builds for Linux(64 bit, Arm), Mac(64bit, Arm), Windows and Docker
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - v[0-9]+.[0-9]+.[0-9]+*
@@ -20,7 +21,7 @@ on:
 jobs:
   build-linux:
     name: Build for ${{matrix.target}}
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
       contents: write
@@ -172,7 +173,7 @@ jobs:
 
   build-kafka-linux:
     name: Build Kafka for x86_64-unknown-linux-gnu
-    runs-on: self-hosted
+    runs-on: ubuntu-24.04
     permissions:
       id-token: write
       contents: write
@@ -350,6 +351,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-push-docker-image:
+    if: github.repository == 'parseablehq/parseable'
     runs-on: self-hosted
     steps:
       - name: Checkout
